@@ -1,0 +1,389 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────
+#  ADMINSTER — docker-compose.yml (DEV)
+#  Sobe toda a stack: infra + backend + consumers + frontend
+#  Uso: cp .env.example .env && docker compose up -d
+# ─────────────────────────────────────────────
+
+x-logging: &logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+networks:
+  adminster:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  kafka-data:
+  zookeeper-data:
+  zookeeper-log:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+  tempo-data:
+
+services:
+
+# ════════════════════════════════════════════
+#  INFRA — Banco, Cache, Mensageria
+# ════════════════════════════════════════════
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: adminster-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: adminster
+      POSTGRES_USER: adminster_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-adminster_pass}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - adminster
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U adminster_user -d adminster"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *logging
+
+  redis:
+    image: redis:7-alpine
+    container_name: adminster-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-adminster_redis}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1
+      --loglevel warning
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - adminster
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-adminster_redis}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *logging
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: adminster-zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_LOG4J_ROOT_LOGLEVEL: WARN
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-log:/var/lib/zookeeper/log
+    networks:
+      - adminster
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *logging
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: adminster-kafka
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_RETENTION_HOURS: 24
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - adminster
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    logging: *logging
+
+  # Cria os tópicos na primeira vez
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: adminster-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - adminster
+    command: >
+      bash -c "
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --replication-factor 1 --partitions 3 --topic audit-events &&
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --replication-factor 1 --partitions 3 --topic notificacoes &&
+        kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --replication-factor 1 --partitions 2 --topic integracoes &&
+        echo 'Topicos Kafka criados com sucesso.'
+      "
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: adminster-kafka-ui
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: adminster-dev
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+      SERVER_PORT: 8090
+    ports:
+      - "8090:8090"
+    networks:
+      - adminster
+    logging: *logging
+
+# ════════════════════════════════════════════
+#  OBSERVABILIDADE
+# ════════════════════════════════════════════
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: adminster-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - adminster
+    logging: *logging
+
+  loki:
+    image: grafana/loki:2.9.6
+    container_name: adminster-loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/loki-config.yml
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./docker/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+    networks:
+      - adminster
+    logging: *logging
+
+  tempo:
+    image: grafana/tempo:2.4.1
+    container_name: adminster-tempo
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo/tempo-config.yml"]
+    ports:
+      - "4317:4317"   # OTLP gRPC  ← Spring Boot envia traces aqui
+      - "4318:4318"   # OTLP HTTP  ← Spring Boot envia traces aqui
+      - "16686:16686" # Jaeger UI
+    volumes:
+      - ./docker/tempo/tempo-config.yml:/etc/tempo/tempo-config.yml:ro
+      - tempo-data:/tmp/tempo
+    networks:
+      - adminster
+    logging: *logging
+
+  grafana:
+    image: grafana/grafana:10.4.1
+    container_name: adminster-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_HTTP_PORT: 3001
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_LOG_LEVEL: warn
+    ports:
+      - "3001:3001"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - adminster
+    logging: *logging
+
+# ════════════════════════════════════════════
+#  APLICAÇÃO — Backend, Consumers, Frontend
+# ════════════════════════════════════════════
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: adminster-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/adminster
+      SPRING_DATASOURCE_USERNAME: adminster_user
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-adminster_pass}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:-adminster_redis}
+      JWT_SECRET: ${JWT_SECRET:-chave-local-minimo-256-bits-trocar-em-prod}
+      JWT_EXPIRATION: 86400000
+      OTLP_ENDPOINT: http://tempo:4318/v1/traces
+      CORS_ALLOWED_ORIGINS: http://localhost:3000,http://localhost
+    ports:
+      - "8080:8080"
+    networks:
+      - adminster
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/actuator/health || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+    logging: *logging
+
+  audit-service:
+    build:
+      context: ./consumers/audit-service
+      dockerfile: Dockerfile
+    container_name: adminster-audit-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/adminster
+      SPRING_DATASOURCE_USERNAME: adminster_user
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-adminster_pass}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_KAFKA_CONSUMER_GROUP_ID: audit-service
+      OTLP_ENDPOINT: http://tempo:4318/v1/traces
+    networks:
+      - adminster
+    logging: *logging
+
+  notification-service:
+    build:
+      context: ./consumers/notification-service
+      dockerfile: Dockerfile
+    container_name: adminster-notification-service
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_KAFKA_CONSUMER_GROUP_ID: notification-service
+      OTLP_ENDPOINT: http://tempo:4318/v1/traces
+      MAIL_HOST: ${MAIL_HOST:-smtp.mailtrap.io}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+    networks:
+      - adminster
+    logging: *logging
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: adminster-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost/api/v1
+      NEXT_PUBLIC_APP_NAME: Adminster
+    ports:
+      - "3000:3000"
+    networks:
+      - adminster
+    logging: *logging
+
+# ════════════════════════════════════════════
+#  GATEWAY
+# ════════════════════════════════════════════
+
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: adminster-nginx
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - frontend
+    ports:
+      - "80:80"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - adminster
+    logging: *logging
+
+# ════════════════════════════════════════════
+#  MAPA DE PORTAS
+# ════════════════════════════════════════════
+#
+#  Serviço                Porta    URL
+#  ──────────────────────────────────────────────────────
+#  nginx (gateway)        80       http://localhost
+#  frontend (Next.js)     3000     http://localhost:3000
+#  backend (Spring)       8080     http://localhost:8080
+#  swagger ui             8080     http://localhost:8080/swagger-ui.html
+#  postgres               5432     localhost:5432
+#  redis                  6379     localhost:6379
+#  kafka                  9092     localhost:9092
+#  kafka-ui               8090     http://localhost:8090
+#  prometheus             9090     http://localhost:9090
+#  grafana                3001     http://localhost:3001  (admin/admin)
+#  loki                   3100     http://localhost:3100
+#  tempo otlp grpc        4317     —
+#  tempo otlp http        4318     —
+#  jaeger ui              16686    http://localhost:16686
+#
