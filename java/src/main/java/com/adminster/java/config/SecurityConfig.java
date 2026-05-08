@@ -1,5 +1,6 @@
 package com.adminster.java.config;
 
+import com.adminster.java.service.impl.UserDetailsServiceImpl;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;

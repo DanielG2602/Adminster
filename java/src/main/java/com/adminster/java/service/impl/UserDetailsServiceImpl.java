@@ -1,4 +1,4 @@
-package com.adminster.java.config;
+package com.adminster.java.service.impl;
 
 import com.adminster.java.repository.UserRepository;
 import lombok.RequiredArgsConstructor;

@@ -60,7 +60,7 @@ public class UserServiceImpl implements UserService {
 
     @Override
     @Transactional(readOnly = true)
-    public Page<UserResponse> listarTodos(Pageable pageable){
+    public Page<UserResponse> listarTodos (Pageable pageable){
         return userRepository.findAllByAtivo(pageable).map(this::toResponse);
     }
 
