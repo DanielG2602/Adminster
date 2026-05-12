@@ -13,5 +13,6 @@ public interface UserRepository extends JpaRepository<User, Long> {
     Optional<User> findByEmail(String email);
     Boolean existsByEmail(String email);
     Boolean existsByCpf(String cpf);
-    Page<User> findAllByAtivo(Pageable pageable);
+    Page<User> findAllByAtivoTrue(Pageable pageable);
+    Page<User> findByDepartamentoId (Long departamentoId, Pageable pageable);
 }

@@ -1,5 +1,6 @@
 package com.adminster.java.dto.response;
 
+import com.adminster.java.domain.Departamento;
 import com.adminster.java.domain.enums.Role;
 
 import java.time.LocalDate;
@@ -15,5 +16,6 @@ public record UserResponse(
         String cargoNome,
         Role role,
         Boolean ativo,
+        String departamentoName,
         LocalDateTime createdAt
 ) {}

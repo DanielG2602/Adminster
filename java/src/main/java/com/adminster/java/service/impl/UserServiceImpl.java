@@ -60,8 +60,14 @@ public class UserServiceImpl implements UserService {
 
     @Override
     @Transactional(readOnly = true)
+    public Page<UserResponse> listarPorDepartamento(Long departamentoId, Pageable pageable) {
+        return userRepository.findByDepartamentoId(departamentoId, pageable).map(this::toResponse);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
     public Page<UserResponse> listarTodos (Pageable pageable){
-        return userRepository.findAllByAtivo(pageable).map(this::toResponse);
+        return userRepository.findAllByAtivoTrue(pageable).map(this::toResponse);
     }
 
     @Override
@@ -94,12 +100,6 @@ public class UserServiceImpl implements UserService {
         userRepository.save(user);
     }
 
-    @Override
-    public UserResponse login (String email, String senha){
-        throw new UnsupportedOperationException("User authService");
-    }
-
-
     private User buscarOuLancar(Long id){
         return userRepository.findById(id).orElseThrow(()-> new ResourceNotFoundException("Usuario nao encontrado"));
     }
@@ -115,6 +115,7 @@ public class UserServiceImpl implements UserService {
             user.getCargo().getName(),
             user.getRole(),
             user.getAtivo(),
+            user.getDepartamento() != null ? user.getDepartamento().getName() : null ,
             user.getCreatedAt()
         );
     }

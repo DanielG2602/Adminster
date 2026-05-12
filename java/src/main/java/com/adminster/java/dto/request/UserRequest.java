@@ -1,5 +1,6 @@
 package com.adminster.java.dto.request;
 
+import com.adminster.java.domain.Departamento;
 import com.adminster.java.domain.enums.Role;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
@@ -16,5 +17,6 @@ public record UserRequest(
         String cpf,
         LocalDate dataNascimento,
         Long cargoId,
-        Role role
+        Role role,
+        Departamento departamento
 ) {}
